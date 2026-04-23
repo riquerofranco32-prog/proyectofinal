@@ -53,12 +53,26 @@ export default function Home() {
           Seleccioná un escenario
         </p>
 
-        <div style={{ display: 'flex', gap: '1.25rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+          <Link href="/overview" style={{
+            background: 'rgba(74,200,100,0.12)',
+            border: '1px solid rgba(74,200,100,0.3)',
+            borderRadius: '14px',
+            padding: '1.25rem 2rem',
+            color: '#fff',
+            textDecoration: 'none',
+            fontSize: '1rem',
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+            backdropFilter: 'blur(8px)',
+          }}>
+            🗺️ Paneo General
+          </Link>
           <Link href="/dashboard" style={{
             background: 'rgba(255,255,255,0.07)',
             border: '1px solid rgba(255,255,255,0.18)',
             borderRadius: '14px',
-            padding: '1.25rem 2.25rem',
+            padding: '1.25rem 2rem',
             color: '#fff',
             textDecoration: 'none',
             fontSize: '1rem',
@@ -72,7 +86,7 @@ export default function Home() {
             background: 'rgba(255,255,255,0.07)',
             border: '1px solid rgba(255,255,255,0.18)',
             borderRadius: '14px',
-            padding: '1.25rem 2.25rem',
+            padding: '1.25rem 2rem',
             color: '#fff',
             textDecoration: 'none',
             fontSize: '1rem',
