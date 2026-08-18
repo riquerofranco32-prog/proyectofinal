@@ -1,5 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ScatterChart, Scatter, Cell, ReferenceLine } from "recharts";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  ScatterChart,
+  Scatter,
+  Cell,
+  ReferenceLine,
+} from "recharts";
 
 // ─── MONTE CARLO ENGINE ───────────────────────────────────────────────────────
 function triangular(min, mode, max) {
@@ -9,20 +21,54 @@ function triangular(min, mode, max) {
   return max - Math.sqrt((1 - u) * (max - min) * (max - mode));
 }
 
-function calcVAN(precio, demanda, cf, cv, inversion, tasa, periodos) {
-  const margen = precio - cv;
-  const utilidadAnual = margen * demanda - cf;
-  let van = -inversion;
+// ponytail: fiscal/accounting items (depreciación, impuestos, capital de trabajo) son
+// determinísticos según el modelo de la planilla, no variables inciertas — solo
+// precio/demanda/costo fijo/costo variable se simulan con distribución triangular.
+function calcVAN(precio, demanda, cf, cv, params) {
+  const {
+    invFijo,
+    capTrabajo,
+    deprY13,
+    deprY45,
+    taxRate,
+    iibbRate,
+    valorResidual,
+    recuperoCT,
+    tasa,
+    periodos,
+  } = params;
+  let van = -(invFijo + capTrabajo);
   for (let t = 1; t <= periodos; t++) {
-    van += utilidadAnual / Math.pow(1 + tasa, t);
+    const depreciacion = t <= 3 ? deprY13 : deprY45;
+    const ingresos = precio * demanda;
+    const iibb = ingresos * iibbRate;
+    const costoVariableTotal = cv * demanda;
+    const utilidadBruta =
+      ingresos - iibb - costoVariableTotal - cf - depreciacion;
+    const impuesto = utilidadBruta > 0 ? utilidadBruta * taxRate : 0;
+    const utilidadNeta = utilidadBruta - impuesto;
+    let flujo = utilidadNeta + depreciacion;
+    if (t === periodos) flujo += valorResidual + recuperoCT;
+    van += flujo / Math.pow(1 + tasa, t);
   }
   return van;
 }
 
 function runSimulation(params, N = 10000) {
-  const { invBase, cfMin, cfMode, cfMax, cvMin, cvMode, cvMax,
-          precMin, precMode, precMax, demMin, demMode, demMax,
-          tasa, periodos } = params;
+  const {
+    cfMin,
+    cfMode,
+    cfMax,
+    cvMin,
+    cvMode,
+    cvMax,
+    precMin,
+    precMode,
+    precMax,
+    demMin,
+    demMode,
+    demMax,
+  } = params;
 
   const results = [];
   const vanVsPrecio = [];
@@ -33,7 +79,7 @@ function runSimulation(params, N = 10000) {
     const demanda = triangular(demMin, demMode, demMax);
     const cf = triangular(cfMin, cfMode, cfMax);
     const cv = triangular(cvMin, cvMode, cvMax);
-    const van = calcVAN(precio, demanda, cf, cv, invBase, tasa, periodos);
+    const van = calcVAN(precio, demanda, cf, cv, params);
     results.push({ van, precio, demanda, cf, cv });
     if (i < 500) {
       vanVsPrecio.push({ x: precio, y: van / 1e6 });
@@ -41,7 +87,7 @@ function runSimulation(params, N = 10000) {
     }
   }
 
-  const vans = results.map(r => r.van);
+  const vans = results.map((r) => r.van);
   vans.sort((a, b) => a - b);
 
   const n = vans.length;
@@ -50,8 +96,9 @@ function runSimulation(params, N = 10000) {
   const std = Math.sqrt(variance);
   const min = vans[0];
   const max = vans[n - 1];
-  const median = n % 2 === 0 ? (vans[n / 2 - 1] + vans[n / 2]) / 2 : vans[Math.floor(n / 2)];
-  const probPos = vans.filter(v => v > 0).length / n;
+  const median =
+    n % 2 === 0 ? (vans[n / 2 - 1] + vans[n / 2]) / 2 : vans[Math.floor(n / 2)];
+  const probPos = vans.filter((v) => v > 0).length / n;
   const cv_coef = std / Math.abs(mean);
 
   // Skewness
@@ -66,16 +113,28 @@ function runSimulation(params, N = 10000) {
     count: 0,
     pos: min + (i + 0.5) * step > 0,
   }));
-  vans.forEach(v => {
+  vans.forEach((v) => {
     const idx = Math.min(Math.floor((v - min) / step), bins - 1);
     hist[idx].count++;
   });
 
   // Sensitivity: correlations
-  const corrPrecio = pearson(results.map(r => r.precio), results.map(r => r.van));
-  const corrDemanda = pearson(results.map(r => r.demanda), results.map(r => r.van));
-  const corrCF = pearson(results.map(r => r.cf), results.map(r => r.van));
-  const corrCV = pearson(results.map(r => r.cv), results.map(r => r.van));
+  const corrPrecio = pearson(
+    results.map((r) => r.precio),
+    results.map((r) => r.van),
+  );
+  const corrDemanda = pearson(
+    results.map((r) => r.demanda),
+    results.map((r) => r.van),
+  );
+  const corrCF = pearson(
+    results.map((r) => r.cf),
+    results.map((r) => r.van),
+  );
+  const corrCV = pearson(
+    results.map((r) => r.cv),
+    results.map((r) => r.van),
+  );
 
   // Elasticity (approx)
   const elastPrecio = (corrPrecio * std) / (mean !== 0 ? Math.abs(mean) : 1);
@@ -108,21 +167,27 @@ function pearson(xs, ys) {
 }
 
 function runScenario(fixed, varied, params, N = 5000) {
-  const { invBase, tasa, periodos } = params;
   const vans = [];
   for (let i = 0; i < N; i++) {
-    const precio = varied === "precio"
-      ? triangular(params.precMin, params.precMode, params.precMax)
-      : params.precMode;
-    const demanda = varied === "demanda"
-      ? triangular(params.demMin, params.demMode, params.demMax)
-      : params.demMode;
-    const cf = fixed ? params.cfMode : triangular(params.cfMin, params.cfMode, params.cfMax);
-    const cv = fixed ? params.cvMode : triangular(params.cvMin, params.cvMode, params.cvMax);
-    vans.push(calcVAN(precio, demanda, cf, cv, invBase, tasa, periodos));
+    const precio =
+      varied === "precio"
+        ? triangular(params.precMin, params.precMode, params.precMax)
+        : params.precMode;
+    const demanda =
+      varied === "demanda"
+        ? triangular(params.demMin, params.demMode, params.demMax)
+        : params.demMode;
+    const cf = fixed
+      ? params.cfMode
+      : triangular(params.cfMin, params.cfMode, params.cfMax);
+    const cv = fixed
+      ? params.cvMode
+      : triangular(params.cvMin, params.cvMode, params.cvMax);
+    vans.push(calcVAN(precio, demanda, cf, cv, params));
   }
   vans.sort((a, b) => a - b);
-  const mn = vans[0], mx = vans[vans.length - 1];
+  const mn = vans[0],
+    mx = vans[vans.length - 1];
   const bins = 30;
   const step = (mx - mn) / bins;
   return Array.from({ length: bins }, (_, i) => ({
@@ -130,7 +195,7 @@ function runScenario(fixed, varied, params, N = 5000) {
     count: 0,
     pos: mn + (i + 0.5) * step > 0,
   })).map((b, i) => {
-    vans.forEach(v => {
+    vans.forEach((v) => {
       if (v >= mn + i * step && v < mn + (i + 1) * step) b.count++;
     });
     return b;
@@ -139,44 +204,114 @@ function runScenario(fixed, varied, params, N = 5000) {
 
 // ─── FORMATTING ───────────────────────────────────────────────────────────────
 const fmt = (v, dec = 2) =>
-  new Intl.NumberFormat("es-AR", { minimumFractionDigits: dec, maximumFractionDigits: dec }).format(v);
-const fmtM = v => `$${fmt(v / 1e6, 2)}M`;
-const fmtPct = v => `${(v * 100).toFixed(1)}%`;
+  new Intl.NumberFormat("es-AR", {
+    minimumFractionDigits: dec,
+    maximumFractionDigits: dec,
+  }).format(v);
+const fmtM = (v) => `$${fmt(v / 1e6, 2)}M`;
+const fmtPct = (v) => `${(v * 100).toFixed(1)}%`;
 
 // ─── PARAMS ──────────────────────────────────────────────────────────────────
+// Escenario 1 (compra de terreno + nave propia) · Tomador de precio — flujo
+// principal según planilla "PF c.xlsx" (18/8/2026). Rangos min/max de
+// precio/demanda/costos son una construcción propia (±10-20% sobre el caso
+// base) ya que la planilla no define distribuciones — ver conclusión.
 const DEFAULT_PARAMS = {
-  invBase: 500000,
-  cfMin: 800000, cfMode: 850408, cfMax: 950000,
-  cvMin: 13500, cvMode: 14572.03, cvMax: 17000,
-  precMin: 17700, precMode: 30000, precMax: 35000,
-  demMin: 272, demMode: 970, demMax: 1475,
-  tasa: 0.18,
+  invFijo: 5194805,
+  capTrabajo: 8687663,
+  deprY13: 268891,
+  deprY45: 244424,
+  valorResidual: 2378379,
+  recuperoCT: 8687663,
+  taxRate: 0.35,
+  iibbRate: 0.03,
+  cfMin: 1630000,
+  cfMode: 1812074,
+  cfMax: 1993000,
+  cvMin: 14800,
+  cvMode: 16466.39,
+  cvMax: 18100,
+  precMin: 26000,
+  precMode: 27571.43,
+  precMax: 32000,
+  demMin: 700,
+  demMode: 970,
+  demMax: 1150,
+  tasa: 0.208,
   periodos: 5,
 };
 
 // ─── COMPONENTS ──────────────────────────────────────────────────────────────
 function StatCard({ label, value, sub, accent }) {
   return (
-    <div style={{
-      background: accent ? "rgba(255,180,0,0.08)" : "rgba(255,255,255,0.03)",
-      border: `1px solid ${accent ? "rgba(255,180,0,0.3)" : "rgba(255,255,255,0.07)"}`,
-      borderRadius: 10,
-      padding: "14px 18px",
-      minWidth: 120,
-    }}>
-      <div style={{ color: "#888", fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
-      <div style={{ color: accent ? "#FFB400" : "#F0F0F0", fontSize: 20, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>{value}</div>
-      {sub && <div style={{ color: "#555", fontSize: 10, marginTop: 3 }}>{sub}</div>}
+    <div
+      style={{
+        background: accent ? "rgba(255,180,0,0.08)" : "rgba(255,255,255,0.03)",
+        border: `1px solid ${accent ? "rgba(255,180,0,0.3)" : "rgba(255,255,255,0.07)"}`,
+        borderRadius: 10,
+        padding: "14px 18px",
+        minWidth: 120,
+      }}
+    >
+      <div
+        style={{
+          color: "#888",
+          fontSize: 10,
+          letterSpacing: 2,
+          textTransform: "uppercase",
+          marginBottom: 4,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          color: accent ? "#FFB400" : "#F0F0F0",
+          fontSize: 20,
+          fontWeight: 700,
+          fontFamily: "'DM Mono', monospace",
+        }}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div style={{ color: "#555", fontSize: 10, marginTop: 3 }}>{sub}</div>
+      )}
     </div>
   );
 }
 
 function SectionTitle({ children, icon }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, marginTop: 36 }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        marginBottom: 20,
+        marginTop: 36,
+      }}
+    >
       <span style={{ fontSize: 18 }}>{icon}</span>
-      <span style={{ color: "#E0E0E0", fontSize: 14, fontWeight: 700, letterSpacing: 3, textTransform: "uppercase", fontFamily: "'DM Mono', monospace" }}>{children}</span>
-      <div style={{ flex: 1, height: 1, background: "linear-gradient(90deg,rgba(255,180,0,0.4),transparent)" }} />
+      <span
+        style={{
+          color: "#E0E0E0",
+          fontSize: 14,
+          fontWeight: 700,
+          letterSpacing: 3,
+          textTransform: "uppercase",
+          fontFamily: "'DM Mono', monospace",
+        }}
+      >
+        {children}
+      </span>
+      <div
+        style={{
+          flex: 1,
+          height: 1,
+          background: "linear-gradient(90deg,rgba(255,180,0,0.4),transparent)",
+        }}
+      />
     </div>
   );
 }
@@ -185,22 +320,67 @@ const VAN_COLORS = { pos: "#00D4A0", neg: "#FF4757" };
 
 function VanHistogram({ data, title }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 16px" }}>
-      <div style={{ color: "#AAA", fontSize: 11, letterSpacing: 2, marginBottom: 14, textTransform: "uppercase" }}>{title}</div>
+    <div
+      style={{
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        padding: "20px 16px",
+      }}
+    >
+      <div
+        style={{
+          color: "#AAA",
+          fontSize: 11,
+          letterSpacing: 2,
+          marginBottom: 14,
+          textTransform: "uppercase",
+        }}
+      >
+        {title}
+      </div>
       <ResponsiveContainer width="100%" height={200}>
-        <BarChart data={data} margin={{ left: 0, right: 0, top: 0, bottom: 0 }} barGap={0} barCategoryGap={0}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="x" tick={{ fill: "#555", fontSize: 9 }} tickFormatter={v => `${Number(v).toFixed(1)}M`} interval="preserveStartEnd" />
+        <BarChart
+          data={data}
+          margin={{ left: 0, right: 0, top: 0, bottom: 0 }}
+          barGap={0}
+          barCategoryGap={0}
+        >
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="rgba(255,255,255,0.04)"
+          />
+          <XAxis
+            dataKey="x"
+            tick={{ fill: "#555", fontSize: 9 }}
+            tickFormatter={(v) => `${Number(v).toFixed(1)}M`}
+            interval="preserveStartEnd"
+          />
           <YAxis tick={{ fill: "#555", fontSize: 9 }} width={32} />
           <Tooltip
-            contentStyle={{ background: "#111", border: "1px solid #333", borderRadius: 6, fontSize: 11 }}
+            contentStyle={{
+              background: "#111",
+              border: "1px solid #333",
+              borderRadius: 6,
+              fontSize: 11,
+            }}
             formatter={(v) => [v, "Iteraciones"]}
             labelFormatter={(l) => `VAN ≈ $${Number(l).toFixed(2)}M USD`}
           />
-          <ReferenceLine x={0} stroke="#FFB400" strokeWidth={2} strokeDasharray="4 4" label={{ value: "VAN=0", fill: "#FFB400", fontSize: 9 }} />
+          <ReferenceLine
+            x={0}
+            stroke="#FFB400"
+            strokeWidth={2}
+            strokeDasharray="4 4"
+            label={{ value: "VAN=0", fill: "#FFB400", fontSize: 9 }}
+          />
           <Bar dataKey="count" radius={[2, 2, 0, 0]}>
             {data.map((entry, i) => (
-              <Cell key={i} fill={entry.pos ? VAN_COLORS.pos : VAN_COLORS.neg} fillOpacity={0.8} />
+              <Cell
+                key={i}
+                fill={entry.pos ? VAN_COLORS.pos : VAN_COLORS.neg}
+                fillOpacity={0.8}
+              />
             ))}
           </Bar>
         </BarChart>
@@ -210,35 +390,94 @@ function VanHistogram({ data, title }) {
 }
 
 function TornadoChart({ data }) {
-  const max = Math.max(...data.map(d => Math.abs(d.corr)));
+  const max = Math.max(...data.map((d) => Math.abs(d.corr)));
   return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 24px" }}>
+    <div
+      style={{
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        padding: "20px 24px",
+      }}
+    >
       {data.map((d, i) => (
         <div key={i} style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-            <span style={{ color: "#CCC", fontSize: 12, fontFamily: "'DM Mono', monospace" }}>{d.var}</span>
-            <span style={{ color: d.corr > 0 ? "#00D4A0" : "#FF4757", fontSize: 11, fontFamily: "'DM Mono', monospace" }}>
-              {d.corr > 0 ? "+" : ""}{d.corr.toFixed(4)}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 4,
+            }}
+          >
+            <span
+              style={{
+                color: "#CCC",
+                fontSize: 12,
+                fontFamily: "'DM Mono', monospace",
+              }}
+            >
+              {d.var}
+            </span>
+            <span
+              style={{
+                color: d.corr > 0 ? "#00D4A0" : "#FF4757",
+                fontSize: 11,
+                fontFamily: "'DM Mono', monospace",
+              }}
+            >
+              {d.corr > 0 ? "+" : ""}
+              {d.corr.toFixed(4)}
             </span>
           </div>
-          <div style={{ height: 22, background: "rgba(255,255,255,0.04)", borderRadius: 4, position: "relative", overflow: "hidden" }}>
-            <div style={{
-              position: "absolute",
-              left: d.corr > 0 ? "50%" : `${50 - (Math.abs(d.corr) / max) * 50}%`,
-              width: `${(Math.abs(d.corr) / max) * 50}%`,
-              height: "100%",
-              background: d.corr > 0
-                ? "linear-gradient(90deg,rgba(0,212,160,0.6),rgba(0,212,160,0.9))"
-                : "linear-gradient(90deg,rgba(255,71,87,0.9),rgba(255,71,87,0.6))",
-              borderRadius: 3,
-            }} />
-            <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "#444" }} />
+          <div
+            style={{
+              height: 22,
+              background: "rgba(255,255,255,0.04)",
+              borderRadius: 4,
+              position: "relative",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                left:
+                  d.corr > 0 ? "50%" : `${50 - (Math.abs(d.corr) / max) * 50}%`,
+                width: `${(Math.abs(d.corr) / max) * 50}%`,
+                height: "100%",
+                background:
+                  d.corr > 0
+                    ? "linear-gradient(90deg,rgba(0,212,160,0.6),rgba(0,212,160,0.9))"
+                    : "linear-gradient(90deg,rgba(255,71,87,0.9),rgba(255,71,87,0.6))",
+                borderRadius: 3,
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: 0,
+                bottom: 0,
+                width: 1,
+                background: "#444",
+              }}
+            />
           </div>
         </div>
       ))}
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
-        <span style={{ color: "#555", fontSize: 9 }}>Correlación negativa ←</span>
-        <span style={{ color: "#555", fontSize: 9 }}>→ Correlación positiva</span>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginTop: 8,
+        }}
+      >
+        <span style={{ color: "#555", fontSize: 9 }}>
+          Correlación negativa ←
+        </span>
+        <span style={{ color: "#555", fontSize: 9 }}>
+          → Correlación positiva
+        </span>
       </div>
     </div>
   );
@@ -246,17 +485,66 @@ function TornadoChart({ data }) {
 
 function ScatterPlot({ data, xlabel, color, title }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, padding: "20px 16px" }}>
-      <div style={{ color: "#AAA", fontSize: 11, letterSpacing: 2, marginBottom: 14, textTransform: "uppercase" }}>{title}</div>
+    <div
+      style={{
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        padding: "20px 16px",
+      }}
+    >
+      <div
+        style={{
+          color: "#AAA",
+          fontSize: 11,
+          letterSpacing: 2,
+          marginBottom: 14,
+          textTransform: "uppercase",
+        }}
+      >
+        {title}
+      </div>
       <ResponsiveContainer width="100%" height={200}>
         <ScatterChart margin={{ left: 0, right: 0, top: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="x" type="number" name={xlabel} tick={{ fill: "#555", fontSize: 9 }}
-            tickFormatter={v => xlabel === "Precio" ? `$${(v / 1000).toFixed(0)}k` : v.toFixed(0)} />
-          <YAxis dataKey="y" type="number" name="VAN (M)" tick={{ fill: "#555", fontSize: 9 }} tickFormatter={v => `${v.toFixed(1)}M`} width={36} />
-          <ReferenceLine y={0} stroke="#FFB400" strokeWidth={1.5} strokeDasharray="4 4" />
-          <Tooltip contentStyle={{ background: "#111", border: "1px solid #333", borderRadius: 6, fontSize: 10 }}
-            formatter={(v, n) => [n === "VAN (M)" ? `$${v.toFixed(2)}M` : v.toFixed(0), n]} />
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="rgba(255,255,255,0.04)"
+          />
+          <XAxis
+            dataKey="x"
+            type="number"
+            name={xlabel}
+            tick={{ fill: "#555", fontSize: 9 }}
+            tickFormatter={(v) =>
+              xlabel === "Precio" ? `$${(v / 1000).toFixed(0)}k` : v.toFixed(0)
+            }
+          />
+          <YAxis
+            dataKey="y"
+            type="number"
+            name="VAN (M)"
+            tick={{ fill: "#555", fontSize: 9 }}
+            tickFormatter={(v) => `${v.toFixed(1)}M`}
+            width={36}
+          />
+          <ReferenceLine
+            y={0}
+            stroke="#FFB400"
+            strokeWidth={1.5}
+            strokeDasharray="4 4"
+          />
+          <Tooltip
+            contentStyle={{
+              background: "#111",
+              border: "1px solid #333",
+              borderRadius: 6,
+              fontSize: 10,
+            }}
+            formatter={(v, n) => [
+              n === "VAN (M)" ? `$${v.toFixed(2)}M` : v.toFixed(0),
+              n,
+            ]}
+          />
           <Scatter data={data} fill={color} fillOpacity={0.4} r={2} />
         </ScatterChart>
       </ResponsiveContainer>
@@ -292,48 +580,104 @@ export default function App() {
     }, 80);
   }, [params, N]);
 
-  useEffect(() => { run(); }, []);
+  useEffect(() => {
+    run();
+  }, []);
 
-  const setP = (k, v) => setParams(p => ({ ...p, [k]: parseFloat(v) || 0 }));
+  const setP = (k, v) => setParams((p) => ({ ...p, [k]: parseFloat(v) || 0 }));
 
   const stats = result?.stats;
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      background: "#0A0A0C",
-      color: "#E0E0E0",
-      fontFamily: "'Sora', 'Segoe UI', sans-serif",
-      padding: "0 0 60px",
-    }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        background: "#0A0A0C",
+        color: "#E0E0E0",
+        fontFamily: "'Sora', 'Segoe UI', sans-serif",
+        padding: "0 0 60px",
+      }}
+    >
       {/* HEADER */}
-      <div style={{
-        background: "linear-gradient(135deg,#0F0F14 0%,#13131A 60%,#0F1018 100%)",
-        borderBottom: "1px solid rgba(255,180,0,0.15)",
-        padding: "28px 32px 24px",
-        position: "sticky", top: 0, zIndex: 100,
-      }}>
+      <div
+        style={{
+          background:
+            "linear-gradient(135deg,#0F0F14 0%,#13131A 60%,#0F1018 100%)",
+          borderBottom: "1px solid rgba(255,180,0,0.15)",
+          padding: "28px 32px 24px",
+          position: "sticky",
+          top: 0,
+          zIndex: 100,
+        }}
+      >
         <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: 16,
+            }}
+          >
             <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-                <div style={{ width: 6, height: 24, background: "#FFB400", borderRadius: 3 }} />
-                <span style={{ color: "#FFB400", fontSize: 10, letterSpacing: 4, textTransform: "uppercase", fontFamily: "'DM Mono', monospace" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  marginBottom: 4,
+                }}
+              >
+                <div
+                  style={{
+                    width: 6,
+                    height: 24,
+                    background: "#FFB400",
+                    borderRadius: 3,
+                  }}
+                />
+                <span
+                  style={{
+                    color: "#FFB400",
+                    fontSize: 10,
+                    letterSpacing: 4,
+                    textTransform: "uppercase",
+                    fontFamily: "'DM Mono', monospace",
+                  }}
+                >
                   Simulación Monte Carlo · Análisis de Riesgo
                 </span>
               </div>
-              <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: "#F5F5F5", letterSpacing: -0.5 }}>
-                Evaluación de Proyectos · Escenario 2 — Alquiler
+              <h1
+                style={{
+                  margin: 0,
+                  fontSize: 22,
+                  fontWeight: 800,
+                  color: "#F5F5F5",
+                  letterSpacing: -0.5,
+                }}
+              >
+                Evaluación de Proyectos · Escenario 1 — Compra y Construcción
               </h1>
               <p style={{ margin: "4px 0 0", color: "#555", fontSize: 12 }}>
-                WACC 18% · 5 períodos · {N.toLocaleString()} iteraciones · Distribución Triangular
+                Tasa de descuento 20,8% (CAPM) · 5 períodos ·{" "}
+                {N.toLocaleString()} iteraciones · Distribución Triangular
               </p>
             </div>
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <select
                 value={N}
-                onChange={e => setN(parseInt(e.target.value))}
-                style={{ background: "#1A1A20", border: "1px solid #333", color: "#CCC", borderRadius: 6, padding: "6px 10px", fontSize: 12, fontFamily: "'DM Mono', monospace" }}
+                onChange={(e) => setN(parseInt(e.target.value))}
+                style={{
+                  background: "#1A1A20",
+                  border: "1px solid #333",
+                  color: "#CCC",
+                  borderRadius: 6,
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  fontFamily: "'DM Mono', monospace",
+                }}
               >
                 <option value={5000}>5,000 iter.</option>
                 <option value={10000}>10,000 iter.</option>
@@ -343,11 +687,18 @@ export default function App() {
                 onClick={run}
                 disabled={running}
                 style={{
-                  background: running ? "#222" : "linear-gradient(135deg,#FFB400,#FF8C00)",
+                  background: running
+                    ? "#222"
+                    : "linear-gradient(135deg,#FFB400,#FF8C00)",
                   color: running ? "#555" : "#000",
-                  border: "none", borderRadius: 8, padding: "8px 20px",
-                  fontWeight: 700, fontSize: 13, cursor: running ? "not-allowed" : "pointer",
-                  fontFamily: "'DM Mono', monospace", letterSpacing: 1,
+                  border: "none",
+                  borderRadius: 8,
+                  padding: "8px 20px",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: running ? "not-allowed" : "pointer",
+                  fontFamily: "'DM Mono', monospace",
+                  letterSpacing: 1,
                   transition: "all 0.2s",
                 }}
               >
@@ -359,17 +710,35 @@ export default function App() {
       </div>
 
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "0 24px" }}>
-
         {/* PARAMS */}
         <SectionTitle icon="⚙️">Parámetros del Modelo</SectionTitle>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 12 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))",
+            gap: 12,
+          }}
+        >
           {[
-            { label: "Inversión Inicial (USD)", key: "invBase", step: 10000 },
+            {
+              label: "Inversión Activo Fijo (USD)",
+              key: "invFijo",
+              step: 10000,
+            },
+            {
+              label: "Capital de Trabajo (USD)",
+              key: "capTrabajo",
+              step: 10000,
+            },
             { label: "Costo Fijo Mínimo (USD)", key: "cfMin", step: 10000 },
             { label: "Costo Fijo Probable (USD)", key: "cfMode", step: 10000 },
             { label: "Costo Fijo Máximo (USD)", key: "cfMax", step: 10000 },
             { label: "Costo Variable Mínimo (USD/u)", key: "cvMin", step: 100 },
-            { label: "Costo Variable Probable (USD/u)", key: "cvMode", step: 100 },
+            {
+              label: "Costo Variable Probable (USD/u)",
+              key: "cvMode",
+              step: 100,
+            },
             { label: "Costo Variable Máximo (USD/u)", key: "cvMax", step: 100 },
             { label: "Precio Mínimo (USD/u)", key: "precMin", step: 500 },
             { label: "Precio Probable (USD/u)", key: "precMode", step: 500 },
@@ -377,23 +746,43 @@ export default function App() {
             { label: "Demanda Mínima (u/año)", key: "demMin", step: 10 },
             { label: "Demanda Probable (u/año)", key: "demMode", step: 10 },
             { label: "Demanda Máxima (u/año)", key: "demMax", step: 10 },
-            { label: "Tasa de Descuento (WACC)", key: "tasa", step: 0.01 },
+            { label: "Tasa de Descuento (CAPM)", key: "tasa", step: 0.01 },
             { label: "Períodos (años)", key: "periodos", step: 1 },
           ].map(({ label, key, step }) => (
-            <div key={key} style={{
-              background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)",
-              borderRadius: 8, padding: "10px 14px",
-            }}>
-              <div style={{ color: "#666", fontSize: 9, letterSpacing: 1.5, marginBottom: 4, textTransform: "uppercase" }}>{label}</div>
+            <div
+              key={key}
+              style={{
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                borderRadius: 8,
+                padding: "10px 14px",
+              }}
+            >
+              <div
+                style={{
+                  color: "#666",
+                  fontSize: 9,
+                  letterSpacing: 1.5,
+                  marginBottom: 4,
+                  textTransform: "uppercase",
+                }}
+              >
+                {label}
+              </div>
               <input
                 type="number"
                 value={params[key]}
                 step={step}
-                onChange={e => setP(key, e.target.value)}
+                onChange={(e) => setP(key, e.target.value)}
                 style={{
-                  background: "transparent", border: "none", color: "#FFB400",
-                  fontSize: 15, fontFamily: "'DM Mono', monospace", fontWeight: 700,
-                  width: "100%", outline: "none",
+                  background: "transparent",
+                  border: "none",
+                  color: "#FFB400",
+                  fontSize: 15,
+                  fontFamily: "'DM Mono', monospace",
+                  fontWeight: 700,
+                  width: "100%",
+                  outline: "none",
                 }}
               />
             </div>
@@ -401,94 +790,206 @@ export default function App() {
         </div>
 
         {/* VAN BASE */}
-        {result && (() => {
-          const vanBase = calcVAN(params.precMode, params.demMode, params.cfMode, params.cvMode, params.invBase, params.tasa, params.periodos);
-          return (
-            <div style={{
-              marginTop: 24,
-              background: "rgba(255,180,0,0.06)",
-              border: "1px solid rgba(255,180,0,0.2)",
-              borderRadius: 12, padding: "16px 24px",
-              display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap",
-            }}>
-              <div>
-                <div style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}>VAN ESCENARIO BASE</div>
-                <div style={{ color: "#FFB400", fontSize: 28, fontWeight: 800, fontFamily: "'DM Mono', monospace" }}>
-                  {fmtM(vanBase)}
+        {result &&
+          (() => {
+            const vanBase = calcVAN(
+              params.precMode,
+              params.demMode,
+              params.cfMode,
+              params.cvMode,
+              params,
+            );
+            return (
+              <div
+                style={{
+                  marginTop: 24,
+                  background: "rgba(255,180,0,0.06)",
+                  border: "1px solid rgba(255,180,0,0.2)",
+                  borderRadius: 12,
+                  padding: "16px 24px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 24,
+                  flexWrap: "wrap",
+                }}
+              >
+                <div>
+                  <div
+                    style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}
+                  >
+                    VAN ESCENARIO BASE
+                  </div>
+                  <div
+                    style={{
+                      color: "#FFB400",
+                      fontSize: 28,
+                      fontWeight: 800,
+                      fontFamily: "'DM Mono', monospace",
+                    }}
+                  >
+                    {fmtM(vanBase)}
+                  </div>
+                </div>
+                <div style={{ color: "#444", fontSize: 20 }}>|</div>
+                <div>
+                  <div
+                    style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}
+                  >
+                    UTILIDAD ANUAL BASE
+                  </div>
+                  <div
+                    style={{
+                      color: "#00D4A0",
+                      fontSize: 18,
+                      fontWeight: 700,
+                      fontFamily: "'DM Mono', monospace",
+                    }}
+                  >
+                    {fmtM(
+                      (params.precMode - params.cvMode) * params.demMode -
+                        params.cfMode,
+                    )}
+                  </div>
+                </div>
+                <div style={{ color: "#444", fontSize: 20 }}>|</div>
+                <div>
+                  <div
+                    style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}
+                  >
+                    MARGEN BRUTO UNIT.
+                  </div>
+                  <div
+                    style={{
+                      color: "#7B9FFF",
+                      fontSize: 18,
+                      fontWeight: 700,
+                      fontFamily: "'DM Mono', monospace",
+                    }}
+                  >
+                    ${fmt(params.precMode - params.cvMode)}
+                  </div>
+                </div>
+                <div style={{ color: "#444", fontSize: 20 }}>|</div>
+                <div>
+                  <div
+                    style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}
+                  >
+                    PUNTO DE EQUILIBRIO
+                  </div>
+                  <div
+                    style={{
+                      color: "#FF9F43",
+                      fontSize: 18,
+                      fontWeight: 700,
+                      fontFamily: "'DM Mono', monospace",
+                    }}
+                  >
+                    {(
+                      params.cfMode /
+                      (params.precMode - params.cvMode)
+                    ).toFixed(1)}{" "}
+                    u/año
+                  </div>
                 </div>
               </div>
-              <div style={{ color: "#444", fontSize: 20 }}>|</div>
-              <div>
-                <div style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}>UTILIDAD ANUAL BASE</div>
-                <div style={{ color: "#00D4A0", fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>
-                  {fmtM((params.precMode - params.cvMode) * params.demMode - params.cfMode)}
-                </div>
-              </div>
-              <div style={{ color: "#444", fontSize: 20 }}>|</div>
-              <div>
-                <div style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}>MARGEN BRUTO UNIT.</div>
-                <div style={{ color: "#7B9FFF", fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>
-                  ${fmt(params.precMode - params.cvMode)}
-                </div>
-              </div>
-              <div style={{ color: "#444", fontSize: 20 }}>|</div>
-              <div>
-                <div style={{ color: "#888", fontSize: 10, letterSpacing: 2 }}>PUNTO DE EQUILIBRIO</div>
-                <div style={{ color: "#FF9F43", fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>
-                  {(params.cfMode / (params.precMode - params.cvMode)).toFixed(1)} u/año
-                </div>
-              </div>
-            </div>
-          );
-        })()}
+            );
+          })()}
 
         {/* STATS */}
         {stats && (
           <>
-            <SectionTitle icon="📊">Estadísticas de la Simulación ({N.toLocaleString()} iteraciones)</SectionTitle>
+            <SectionTitle icon="📊">
+              Estadísticas de la Simulación ({N.toLocaleString()} iteraciones)
+            </SectionTitle>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
               <StatCard label="VAN Medio" value={fmtM(stats.mean)} accent />
               <StatCard label="VAN Mediana" value={fmtM(stats.median)} />
               <StatCard label="Desv. Estándar" value={fmtM(stats.std)} />
               <StatCard label="VAN Mínimo" value={fmtM(stats.min)} />
               <StatCard label="VAN Máximo" value={fmtM(stats.max)} />
-              <StatCard label="Prob. VAN > 0" value={fmtPct(stats.probPos)} accent />
+              <StatCard
+                label="Prob. VAN > 0"
+                value={fmtPct(stats.probPos)}
+                accent
+              />
               <StatCard label="Coef. Variación" value={fmt(stats.cv, 3)} />
               <StatCard label="Asimetría (Skew)" value={fmt(stats.skew, 3)} />
             </div>
 
             {/* PROBABILITY GAUGE */}
-            <div style={{
-              marginTop: 16,
-              background: "rgba(255,255,255,0.02)",
-              border: `1px solid ${stats.probPos > 0.7 ? "rgba(0,212,160,0.3)" : stats.probPos > 0.5 ? "rgba(255,180,0,0.3)" : "rgba(255,71,87,0.3)"}`,
-              borderRadius: 12, padding: "18px 24px",
-            }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10, alignItems: "center" }}>
-                <span style={{ fontSize: 11, letterSpacing: 2, color: "#888", textTransform: "uppercase" }}>
+            <div
+              style={{
+                marginTop: 16,
+                background: "rgba(255,255,255,0.02)",
+                border: `1px solid ${stats.probPos > 0.7 ? "rgba(0,212,160,0.3)" : stats.probPos > 0.5 ? "rgba(255,180,0,0.3)" : "rgba(255,71,87,0.3)"}`,
+                borderRadius: 12,
+                padding: "18px 24px",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginBottom: 10,
+                  alignItems: "center",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 11,
+                    letterSpacing: 2,
+                    color: "#888",
+                    textTransform: "uppercase",
+                  }}
+                >
                   Probabilidad de Viabilidad (VAN &gt; 0)
                 </span>
-                <span style={{
-                  fontFamily: "'DM Mono', monospace", fontWeight: 800, fontSize: 22,
-                  color: stats.probPos > 0.7 ? "#00D4A0" : stats.probPos > 0.5 ? "#FFB400" : "#FF4757",
-                }}>
+                <span
+                  style={{
+                    fontFamily: "'DM Mono', monospace",
+                    fontWeight: 800,
+                    fontSize: 22,
+                    color:
+                      stats.probPos > 0.7
+                        ? "#00D4A0"
+                        : stats.probPos > 0.5
+                          ? "#FFB400"
+                          : "#FF4757",
+                  }}
+                >
                   {fmtPct(stats.probPos)}
                 </span>
               </div>
-              <div style={{ height: 12, background: "rgba(255,255,255,0.05)", borderRadius: 6, overflow: "hidden" }}>
-                <div style={{
-                  height: "100%",
-                  width: `${stats.probPos * 100}%`,
-                  background: stats.probPos > 0.7
-                    ? "linear-gradient(90deg,#00D4A0,#00FFC8)"
-                    : stats.probPos > 0.5
-                      ? "linear-gradient(90deg,#FF8C00,#FFB400)"
-                      : "linear-gradient(90deg,#FF4757,#FF6B81)",
+              <div
+                style={{
+                  height: 12,
+                  background: "rgba(255,255,255,0.05)",
                   borderRadius: 6,
-                  transition: "width 0.8s ease",
-                }} />
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${stats.probPos * 100}%`,
+                    background:
+                      stats.probPos > 0.7
+                        ? "linear-gradient(90deg,#00D4A0,#00FFC8)"
+                        : stats.probPos > 0.5
+                          ? "linear-gradient(90deg,#FF8C00,#FFB400)"
+                          : "linear-gradient(90deg,#FF4757,#FF6B81)",
+                    borderRadius: 6,
+                    transition: "width 0.8s ease",
+                  }}
+                />
               </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: 6 }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginTop: 6,
+                }}
+              >
                 <span style={{ color: "#444", fontSize: 9 }}>0%</span>
                 <span style={{ color: "#FFB400", fontSize: 9 }}>50%</span>
                 <span style={{ color: "#444", fontSize: 9 }}>100%</span>
@@ -500,30 +1001,83 @@ export default function App() {
         {/* HISTOGRAM MAIN */}
         {result && (
           <>
-            <SectionTitle icon="📈">Distribución del VAN — Histograma Completo</SectionTitle>
-            <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 14, padding: "24px 20px" }}>
+            <SectionTitle icon="📈">
+              Distribución del VAN — Histograma Completo
+            </SectionTitle>
+            <div
+              style={{
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.06)",
+                borderRadius: 14,
+                padding: "24px 20px",
+              }}
+            >
               <div style={{ color: "#888", fontSize: 11, marginBottom: 6 }}>
-                <span style={{ color: VAN_COLORS.pos }}>■</span> VAN positivo &nbsp;
-                <span style={{ color: VAN_COLORS.neg }}>■</span> VAN negativo &nbsp;
+                <span style={{ color: VAN_COLORS.pos }}>■</span> VAN positivo
+                &nbsp;
+                <span style={{ color: VAN_COLORS.neg }}>■</span> VAN negativo
+                &nbsp;
                 <span style={{ color: "#FFB400" }}>- -</span> VAN = 0
               </div>
               <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={result.hist} margin={{ left: 10, right: 10, top: 10, bottom: 20 }} barGap={0} barCategoryGap={1}>
-                  <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" />
-                  <XAxis dataKey="x" tick={{ fill: "#555", fontSize: 10 }}
-                    tickFormatter={v => `$${Number(v).toFixed(1)}M`}
-                    label={{ value: "VAN (millones USD)", position: "insideBottom", offset: -12, fill: "#555", fontSize: 11 }} />
-                  <YAxis tick={{ fill: "#555", fontSize: 10 }} width={40}
-                    label={{ value: "Frecuencia", angle: -90, position: "insideLeft", fill: "#555", fontSize: 11 }} />
-                  <Tooltip
-                    contentStyle={{ background: "#0F0F14", border: "1px solid #333", borderRadius: 8, fontSize: 11 }}
-                    formatter={(v) => [`${v} iteraciones`, "Frecuencia"]}
-                    labelFormatter={l => `VAN ≈ $${Number(l).toFixed(2)}M USD`}
+                <BarChart
+                  data={result.hist}
+                  margin={{ left: 10, right: 10, top: 10, bottom: 20 }}
+                  barGap={0}
+                  barCategoryGap={1}
+                >
+                  <CartesianGrid
+                    strokeDasharray="2 4"
+                    stroke="rgba(255,255,255,0.04)"
                   />
-                  <ReferenceLine x={(0).toString()} stroke="#FFB400" strokeWidth={2} strokeDasharray="5 5" />
+                  <XAxis
+                    dataKey="x"
+                    tick={{ fill: "#555", fontSize: 10 }}
+                    tickFormatter={(v) => `$${Number(v).toFixed(1)}M`}
+                    label={{
+                      value: "VAN (millones USD)",
+                      position: "insideBottom",
+                      offset: -12,
+                      fill: "#555",
+                      fontSize: 11,
+                    }}
+                  />
+                  <YAxis
+                    tick={{ fill: "#555", fontSize: 10 }}
+                    width={40}
+                    label={{
+                      value: "Frecuencia",
+                      angle: -90,
+                      position: "insideLeft",
+                      fill: "#555",
+                      fontSize: 11,
+                    }}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      background: "#0F0F14",
+                      border: "1px solid #333",
+                      borderRadius: 8,
+                      fontSize: 11,
+                    }}
+                    formatter={(v) => [`${v} iteraciones`, "Frecuencia"]}
+                    labelFormatter={(l) =>
+                      `VAN ≈ $${Number(l).toFixed(2)}M USD`
+                    }
+                  />
+                  <ReferenceLine
+                    x={(0).toString()}
+                    stroke="#FFB400"
+                    strokeWidth={2}
+                    strokeDasharray="5 5"
+                  />
                   <Bar dataKey="count" radius={[3, 3, 0, 0]}>
                     {result.hist.map((e, i) => (
-                      <Cell key={i} fill={e.pos ? VAN_COLORS.pos : VAN_COLORS.neg} fillOpacity={0.85} />
+                      <Cell
+                        key={i}
+                        fill={e.pos ? VAN_COLORS.pos : VAN_COLORS.neg}
+                        fillOpacity={0.85}
+                      />
                     ))}
                   </Bar>
                 </BarChart>
@@ -535,33 +1089,76 @@ export default function App() {
         {/* TORNADO */}
         {result && (
           <>
-            <SectionTitle icon="🌪️">Análisis de Sensibilidad — Gráfico Tornado</SectionTitle>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <SectionTitle icon="🌪️">
+              Análisis de Sensibilidad — Gráfico Tornado
+            </SectionTitle>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 16,
+              }}
+            >
               <div>
                 <TornadoChart data={result.sensitivity} />
-                <div style={{ marginTop: 12, color: "#555", fontSize: 11, lineHeight: 1.6, padding: "0 4px" }}>
-                  Las barras representan la correlación de Pearson entre cada variable y el VAN simulado.
-                  Un valor más cercano a ±1 indica mayor influencia sobre la rentabilidad del proyecto.
+                <div
+                  style={{
+                    marginTop: 12,
+                    color: "#555",
+                    fontSize: 11,
+                    lineHeight: 1.6,
+                    padding: "0 4px",
+                  }}
+                >
+                  Las barras representan la correlación de Pearson entre cada
+                  variable y el VAN simulado. Un valor más cercano a ±1 indica
+                  mayor influencia sobre la rentabilidad del proyecto.
                 </div>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div
+                style={{ display: "flex", flexDirection: "column", gap: 12 }}
+              >
                 {result.sensitivity.map((d, i) => (
-                  <div key={i} style={{
-                    background: "rgba(255,255,255,0.02)",
-                    border: "1px solid rgba(255,255,255,0.06)",
-                    borderRadius: 10, padding: "14px 18px",
-                    borderLeft: `3px solid ${i === 0 ? "#FFB400" : "#333"}`,
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ color: i === 0 ? "#FFB400" : "#AAA", fontWeight: i === 0 ? 700 : 400, fontSize: 13 }}>
-                        {i === 0 ? "🏆 " : ""}{d.var}
+                  <div
+                    key={i}
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid rgba(255,255,255,0.06)",
+                      borderRadius: 10,
+                      padding: "14px 18px",
+                      borderLeft: `3px solid ${i === 0 ? "#FFB400" : "#333"}`,
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <span
+                        style={{
+                          color: i === 0 ? "#FFB400" : "#AAA",
+                          fontWeight: i === 0 ? 700 : 400,
+                          fontSize: 13,
+                        }}
+                      >
+                        {i === 0 ? "🏆 " : ""}
+                        {d.var}
                       </span>
-                      <span style={{ color: d.corr > 0 ? "#00D4A0" : "#FF4757", fontFamily: "'DM Mono', monospace", fontSize: 13 }}>
+                      <span
+                        style={{
+                          color: d.corr > 0 ? "#00D4A0" : "#FF4757",
+                          fontFamily: "'DM Mono', monospace",
+                          fontSize: 13,
+                        }}
+                      >
                         r = {d.corr.toFixed(4)}
                       </span>
                     </div>
                     <div style={{ color: "#555", fontSize: 10, marginTop: 4 }}>
-                      {d.corr > 0 ? "↑ Incremento positivo en el VAN" : "↑ Incremento negativo en el VAN"}
+                      {d.corr > 0
+                        ? "↑ Incremento positivo en el VAN"
+                        : "↑ Incremento negativo en el VAN"}
                     </div>
                   </div>
                 ))}
@@ -574,10 +1171,25 @@ export default function App() {
         {scenDemanda && scenPrecio && scenConjunto && (
           <>
             <SectionTitle icon="🔬">Análisis por Escenario</SectionTitle>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
-              <VanHistogram data={scenDemanda} title="Solo variación en Demanda" />
-              <VanHistogram data={scenPrecio} title="Solo variación en Precio" />
-              <VanHistogram data={scenConjunto} title="Variación Conjunta (todas)" />
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(3,1fr)",
+                gap: 12,
+              }}
+            >
+              <VanHistogram
+                data={scenDemanda}
+                title="Solo variación en Demanda"
+              />
+              <VanHistogram
+                data={scenPrecio}
+                title="Solo variación en Precio"
+              />
+              <VanHistogram
+                data={scenConjunto}
+                title="Variación Conjunta (todas)"
+              />
             </div>
           </>
         )}
@@ -585,10 +1197,28 @@ export default function App() {
         {/* SCATTER */}
         {result && (
           <>
-            <SectionTitle icon="🔵">Dispersión — VAN vs Variables Clave</SectionTitle>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <ScatterPlot data={result.vanVsPrecio} xlabel="Precio" color="#7B9FFF" title="VAN vs Precio de Venta" />
-              <ScatterPlot data={result.vanVsDemanda} xlabel="Demanda" color="#FF9F43" title="VAN vs Demanda" />
+            <SectionTitle icon="🔵">
+              Dispersión — VAN vs Variables Clave
+            </SectionTitle>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 12,
+              }}
+            >
+              <ScatterPlot
+                data={result.vanVsPrecio}
+                xlabel="Precio"
+                color="#7B9FFF"
+                title="VAN vs Precio de Venta"
+              />
+              <ScatterPlot
+                data={result.vanVsDemanda}
+                xlabel="Demanda"
+                color="#FF9F43"
+                title="VAN vs Demanda"
+              />
             </div>
           </>
         )}
@@ -596,61 +1226,150 @@ export default function App() {
         {/* CONCLUSION */}
         {stats && (
           <>
-            <SectionTitle icon="📝">Conclusión — Análisis de Prefactibilidad (Formato Tesis)</SectionTitle>
-            <div style={{
-              background: "rgba(255,255,255,0.02)",
-              border: "1px solid rgba(255,255,255,0.07)",
-              borderRadius: 14, padding: "28px 32px",
-              lineHeight: 1.8, fontSize: 13, color: "#C0C0C0",
-            }}>
+            <SectionTitle icon="📝">
+              Conclusión — Análisis de Prefactibilidad (Formato Tesis)
+            </SectionTitle>
+            <div
+              style={{
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: 14,
+                padding: "28px 32px",
+                lineHeight: 1.8,
+                fontSize: 13,
+                color: "#C0C0C0",
+              }}
+            >
               {(() => {
-                const vanBase = calcVAN(params.precMode, params.demMode, params.cfMode, params.cvMode, params.invBase, params.tasa, params.periodos);
+                const vanBase = calcVAN(
+                  params.precMode,
+                  params.demMode,
+                  params.cfMode,
+                  params.cvMode,
+                  params,
+                );
                 const varCrit = result.sensitivity[0];
-                const riskLevel = stats.probPos > 0.8 ? "bajo" : stats.probPos > 0.6 ? "moderado" : "elevado";
+                const riskLevel =
+                  stats.probPos > 0.8
+                    ? "bajo"
+                    : stats.probPos > 0.6
+                      ? "moderado"
+                      : "elevado";
                 const viable = stats.probPos > 0.5;
-                const payback = params.invBase / ((params.precMode - params.cvMode) * params.demMode - params.cfMode);
+                const ingresosY1 = params.precMode * params.demMode;
+                const utilidadBrutaY1 =
+                  ingresosY1 -
+                  ingresosY1 * params.iibbRate -
+                  params.cvMode * params.demMode -
+                  params.cfMode -
+                  params.deprY13;
+                const fcfY1 =
+                  utilidadBrutaY1 -
+                  (utilidadBrutaY1 > 0 ? utilidadBrutaY1 * params.taxRate : 0) +
+                  params.deprY13;
+                const payback = (params.invFijo + params.capTrabajo) / fcfY1;
                 return (
                   <>
                     <p>
-                      <strong style={{ color: "#F0F0F0" }}>Análisis de Riesgo — Escenario 2 (Modalidad Alquiler).</strong>{" "}
-                      La presente simulación Monte Carlo, ejecutada con {N.toLocaleString()} iteraciones bajo distribuciones triangulares
-                      para las variables estocásticas, arroja un <strong style={{ color: "#FFB400" }}>VAN esperado de {fmtM(stats.mean)} USD</strong> con
-                      una desviación estándar de {fmtM(stats.std)} USD, lo que implica un coeficiente de variación
-                      de <strong style={{ color: "#FFB400" }}>{fmt(stats.cv, 3)}</strong>. El VAN determinístico (escenario base) se ubica
-                      en <strong style={{ color: "#FFB400" }}>{fmtM(vanBase)} USD</strong>.
+                      <strong style={{ color: "#F0F0F0" }}>
+                        Análisis de Riesgo — Escenario 1 (Compra y
+                        Construcción).
+                      </strong>{" "}
+                      La presente simulación Monte Carlo, ejecutada con{" "}
+                      {N.toLocaleString()} iteraciones bajo distribuciones
+                      triangulares para las variables estocásticas, arroja un{" "}
+                      <strong style={{ color: "#FFB400" }}>
+                        VAN esperado de {fmtM(stats.mean)} USD
+                      </strong>{" "}
+                      con una desviación estándar de {fmtM(stats.std)} USD, lo
+                      que implica un coeficiente de variación de{" "}
+                      <strong style={{ color: "#FFB400" }}>
+                        {fmt(stats.cv, 3)}
+                      </strong>
+                      . El VAN determinístico (escenario base) se ubica en{" "}
+                      <strong style={{ color: "#FFB400" }}>
+                        {fmtM(vanBase)} USD
+                      </strong>
+                      .
                     </p>
                     <p>
-                      <strong style={{ color: "#F0F0F0" }}>Probabilidad de viabilidad.</strong>{" "}
+                      <strong style={{ color: "#F0F0F0" }}>
+                        Probabilidad de viabilidad.
+                      </strong>{" "}
                       La probabilidad de obtener un VAN positivo asciende a{" "}
-                      <strong style={{ color: stats.probPos > 0.7 ? "#00D4A0" : "#FFB400" }}>{fmtPct(stats.probPos)}</strong>,{" "}
-                      lo que indica que el proyecto resulta {viable ? "financieramente viable" : "financieramente incierto"} en
-                      la mayoría de los escenarios simulados a la tasa de descuento del{" "}
-                      <strong>{fmtPct(params.tasa)}</strong> (WACC). El período de recupero estimado en
-                      el escenario base es de aproximadamente <strong style={{ color: "#7B9FFF" }}>{payback.toFixed(2)} años</strong>.
+                      <strong
+                        style={{
+                          color: stats.probPos > 0.7 ? "#00D4A0" : "#FFB400",
+                        }}
+                      >
+                        {fmtPct(stats.probPos)}
+                      </strong>
+                      , lo que indica que el proyecto resulta{" "}
+                      {viable
+                        ? "financieramente viable"
+                        : "financieramente incierto"}{" "}
+                      en la mayoría de los escenarios simulados a la tasa de
+                      descuento del <strong>{fmtPct(params.tasa)}</strong> (tasa
+                      de descuento). El período de recupero estimado en el
+                      escenario base es de aproximadamente{" "}
+                      <strong style={{ color: "#7B9FFF" }}>
+                        {payback.toFixed(2)} años
+                      </strong>
+                      .
                     </p>
                     <p>
-                      <strong style={{ color: "#F0F0F0" }}>Variable crítica.</strong>{" "}
-                      El análisis de sensibilidad mediante correlaciones de Pearson identifica al{" "}
-                      <strong style={{ color: "#FFB400" }}>{varCrit.var}</strong> como la variable de mayor
-                      impacto sobre el VAN (r = {varCrit.corr.toFixed(4)}), lo que implica que
-                      las estrategias de gestión de riesgo deben orientarse prioritariamente al control
-                      y seguimiento de esta variable. La elasticidad del VAN respecto al precio
-                      asciende a {result.elastPrecio.toFixed(3)}, mientras que respecto a la demanda
-                      es de {result.elastDemanda.toFixed(3)}.
+                      <strong style={{ color: "#F0F0F0" }}>
+                        Variable crítica.
+                      </strong>{" "}
+                      El análisis de sensibilidad mediante correlaciones de
+                      Pearson identifica al{" "}
+                      <strong style={{ color: "#FFB400" }}>
+                        {varCrit.var}
+                      </strong>{" "}
+                      como la variable de mayor impacto sobre el VAN (r ={" "}
+                      {varCrit.corr.toFixed(4)}), lo que implica que las
+                      estrategias de gestión de riesgo deben orientarse
+                      prioritariamente al control y seguimiento de esta
+                      variable. La elasticidad del VAN respecto al precio
+                      asciende a {result.elastPrecio.toFixed(3)}, mientras que
+                      respecto a la demanda es de{" "}
+                      {result.elastDemanda.toFixed(3)}.
                     </p>
                     <p>
-                      <strong style={{ color: "#F0F0F0" }}>Nivel de riesgo y conclusión.</strong>{" "}
-                      La distribución de resultados presenta una asimetría (skewness) de{" "}
-                      {fmt(stats.skew, 3)}, indicando una distribución{" "}
-                      {stats.skew > 0 ? "con sesgo positivo (cola derecha extendida)" : "con sesgo negativo (cola izquierda extendida)"}.{" "}
-                      El rango de resultados abarca desde {fmtM(stats.min)} hasta {fmtM(stats.max)} USD,
-                      reflejando una incertidumbre de nivel <strong style={{ color: riskLevel === "bajo" ? "#00D4A0" : riskLevel === "moderado" ? "#FFB400" : "#FF4757" }}>{riskLevel}</strong>.{" "}
-                      En conclusión, el Escenario 2 (Alquiler) se muestra{" "}
+                      <strong style={{ color: "#F0F0F0" }}>
+                        Nivel de riesgo y conclusión.
+                      </strong>{" "}
+                      La distribución de resultados presenta una asimetría
+                      (skewness) de {fmt(stats.skew, 3)}, indicando una
+                      distribución{" "}
+                      {stats.skew > 0
+                        ? "con sesgo positivo (cola derecha extendida)"
+                        : "con sesgo negativo (cola izquierda extendida)"}
+                      . El rango de resultados abarca desde {fmtM(stats.min)}{" "}
+                      hasta {fmtM(stats.max)} USD, reflejando una incertidumbre
+                      de nivel{" "}
+                      <strong
+                        style={{
+                          color:
+                            riskLevel === "bajo"
+                              ? "#00D4A0"
+                              : riskLevel === "moderado"
+                                ? "#FFB400"
+                                : "#FF4757",
+                        }}
+                      >
+                        {riskLevel}
+                      </strong>
+                      . En conclusión, el Escenario 1 (Compra y Construcción) se
+                      muestra{" "}
                       <strong style={{ color: viable ? "#00D4A0" : "#FF4757" }}>
-                        {viable ? "prefactible desde la perspectiva financiera" : "con riesgo superior al aceptable"}
-                      </strong>,{" "}
-                      sujeto a que la gestión comercial garantice niveles de demanda y precio
-                      próximos a los valores más probables de sus distribuciones estimadas.
+                        {viable
+                          ? "prefactible desde la perspectiva financiera"
+                          : "con riesgo superior al aceptable"}
+                      </strong>
+                      , sujeto a que la gestión comercial garantice niveles de
+                      demanda y precio próximos a los valores más probables de
+                      sus distribuciones estimadas.
                     </p>
                   </>
                 );
@@ -660,11 +1379,19 @@ export default function App() {
         )}
 
         {/* FOOTER */}
-        <div style={{
-          marginTop: 48, borderTop: "1px solid rgba(255,255,255,0.05)",
-          paddingTop: 20, color: "#333", fontSize: 10, textAlign: "center", letterSpacing: 1,
-        }}>
-          Simulación Monte Carlo · Análisis de Riesgo · Evaluación de Proyectos · Ingeniería Industrial
+        <div
+          style={{
+            marginTop: 48,
+            borderTop: "1px solid rgba(255,255,255,0.05)",
+            paddingTop: 20,
+            color: "#333",
+            fontSize: 10,
+            textAlign: "center",
+            letterSpacing: 1,
+          }}
+        >
+          Simulación Monte Carlo · Análisis de Riesgo · Evaluación de Proyectos
+          · Ingeniería Industrial
         </div>
       </div>
 
